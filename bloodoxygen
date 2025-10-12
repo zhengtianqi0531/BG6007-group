@@ -19,7 +19,7 @@ class OximetryDataset(Dataset):
         self.window_size = window_size
         
         # Normalize R, G, B signals using Z-score or min-max normalization
-        self.data] = (self.data] - self.data].mean()) / self.data].std()
+        self.data[['R', 'G', 'B']] = (self.data[['R', 'G', 'B']] - self.data[['R', 'G', 'B']].mean()) / self.data[['R', 'G', 'B']].std()
 
     def __len__(self):
         # Determine the number of possible windows
@@ -27,11 +27,11 @@ class OximetryDataset(Dataset):
 
     def __getitem__(self, idx):
         # Extract a window of PPG data
-        ppg_window = self.data].iloc[idx:idx + self.window_size].values
+        ppg_window = self.data[['R', 'G', 'B']].iloc[idx:idx + self.window_size].values
         
         # Ground truth is typically the SpO2 value at the end of the window (or averaged)
         # We use the final SpO2 value for classification and regression targets
-        spo2_gt = self.data.iloc[idx + self.window_size - 1] 
+        spo2_gt = self.data['SpO2_gt'].iloc[idx + self.window_size - 1] 
         
         # Classification Target: Hypoxemia (SpO2 < 90%) = 1, Normoxic (SpO2 >= 90%) = 0
         classification_target = 1.0 if spo2_gt < 90 else 0.0
