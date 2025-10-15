@@ -4,120 +4,41 @@ import torch
 from torch.utils.data import Dataset
 
 class OximetryDataset(Dataset):
-    """
-    Custom Dataset class for loading PPG and Ground Truth (GT) data.
-    Loads and pairs the three-channel PPG signals with the SpO2 ground truth.
-    """
-    def __init__(self, ppg_file, gt_file, window_size=300):
-        # Load PPG data (R, G, B columns)
-        self.ppg_df = pd.read_csv(ppg_file, index_col=0) 
-        # Load Ground Truth data (e.g., SpO2_gt column)
-        self.gt_df = pd.read_csv(gt_file, index_col=0) 
-
-        # Merge and align data based on time or index
-        self.data = pd.merge(self.ppg_df, self.gt_df, left_index=True, right_index=True, how='inner')
+    def __init__(self, filename='100001.csv', window_size=300, use_columns='auto'):
+        print(f"Loading dataset from {'100001.csv'}...")
+        self.data = pd.read_csv('100001.csv')
+        print(f"Dataset loaded: {self.data.shape[0]} rows × {self.data.shape[1]} columns")
+        print(f"Columns: {self.data.columns.tolist()[:10]}...")
         self.window_size = window_size
-        
-        # Normalize R, G, B signals using Z-score or min-max normalization
-        self.data[['R', 'G', 'B']] = (self.data[['R', 'G', 'B']] - self.data[['R', 'G', 'B']].mean()) / self.data[['R', 'G', 'B']].std()
+       # Identify SpO2 columns (SpO2_1, SpO2_2, SpO2_3, SpO2_4, SpO2_5)
+        self.spo2_columns = [col for col in self.data.columns if 'SpO2' in col and col != 'Time']
 
-    def __len__(self):
-        # Determine the number of possible windows
-        return len(self.data) - self.window_size + 1
+        # Identify Pulse columns (Pulse_1, Pulse_2, etc.)
+        self.pulse_columns = [col for col in self.data.columns if 'Pulse' in col and 'PI' not in col]
 
-    def __getitem__(self, idx):
-        # Extract a window of PPG data
-        ppg_window = self.data[['R', 'G', 'B']].iloc[idx:idx + self.window_size].values
-        
-        # Ground truth is typically the SpO2 value at the end of the window (or averaged)
-        # We use the final SpO2 value for classification and regression targets
-        spo2_gt = self.data['SpO2_gt'].iloc[idx + self.window_size - 1] 
-        
-        # Classification Target: Hypoxemia (SpO2 < 90%) = 1, Normoxic (SpO2 >= 90%) = 0
-        classification_target = 1.0 if spo2_gt < 90 else 0.0
+         # Identify other useful columns
+        self.fio2_columns = [col for col in self.data.columns if 'FiO2' in col]
+        self.etco2_columns = [col for col in self.data.columns if 'EtCO2' in col]
+        print(f"\nDetected columns:")
+        print(f"  SpO2 columns: {self.spo2_columns}")
+        print(f"  Pulse columns: {self.pulse_columns}")
+        print(f"  FiO2 columns: {self.fio2_columns}")
+        print(f"  EtCO2 columns: {self.etco2_columns}")
+        if use_columns == 'auto':
+            # Use SpO2, Pulse, and FiO2 if available
+            self.feature_columns = []
+            if self.spo2_columns:
+                self.feature_columns.extend(self.spo2_columns[:3])  # Use first 3 SpO2
+            if self.pulse_columns:
+                self.feature_columns.extend(self.pulse_columns[:1])  # Use first Pulse
+            if self.fio2_columns:
+                self.feature_columns.extend(self.fio2_columns[:1])  # Use FiO2
+            while len(self.feature_columns) < 3 and self.spo2_columns:
+                self.feature_columns.append(self.spo2_columns[len(self.feature_columns) % len(self.spo2_columns)])
 
-        # Convert to PyTorch tensors and reshape for (Channels, Time)
-        ppg_tensor = torch.tensor(ppg_window, dtype=torch.float32).permute(1, 0) 
-        regression_target = torch.tensor(spo2_gt, dtype=torch.float32)
-        classification_target = torch.tensor(classification_target, dtype=torch.float32)
+        elif use_columns == 'spo2_only':
+            self.feature_columns = self.spo2_columns[:3]
+        else:
+            self.feature_columns = use_columns
 
-        return ppg_tensor, regression_target, classification_target
-        import torch
-import torch.nn as nn
-
-class HybridOximetryModel(nn.Module):
-    """
-    Hybrid Deep Learning Model: 1D CNN for feature extraction + Bi-LSTM for temporal modeling.
-    Designed for Multi-Task Learning (MTL) with two heads: Regression and Classification.
-    """
-    def __init__(self, input_channels=3, window_size=300):
-        super(HybridOximetryModel, self).__init__()
-        
-        # --- 1D CNN Feature Extractor ---
-        # Extracts local features (e.g., waveform shape, AC/DC ratios) 
-        self.cnn_extractor = nn.Sequential(
-            nn.Conv1d(input_channels, 32, kernel_size=5, stride=1, padding=2),
-            nn.BatchNorm1d(32),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2, stride=2),
-            
-            nn.Conv1d(32, 64, kernel_size=5, stride=1, padding=2),
-            nn.BatchNorm1d(64),
-            nn.ReLU(),
-            nn.MaxPool1d(kernel_size=2, stride=2)
-        )
-        
-        # Calculate the size of the temporal dimension after CNN operations
-        # window_size=300 -> 150 -> 75 (temporal dimension)
-        self._feature_dim = 64 
-        
-        # --- Bi-LSTM for Temporal Context ---
-        # Captures sequence dynamics over the extracted features
-        self.rnn = nn.LSTM(input_size=self._feature_dim, hidden_size=64, 
-                           num_layers=2, bidirectional=True, batch_first=True)
-        
-        # Bi-directional LSTM output size is 2 * hidden_size
-        lstm_output_size = 2 * 64
-        
-        # --- Multi-Task Output Heads ---
-        
-        # 1. Regression Head (Continuous SpO2 estimation)
-        self.regression_head = nn.Sequential(
-            nn.Linear(lstm_output_size, 32),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(32, 1) # Output: single continuous SpO2 value
-        )
-
-        # 2. Classification Head (Binary Hypoxemia risk: SpO2 < 90%)
-        self.classification_head = nn.Sequential(
-            nn.Linear(lstm_output_size, 32),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(32, 1), # Output: single logit for binary classification
-            nn.Sigmoid()
-        )
-
-    def forward(self, x):
-        # Input x shape: (Batch_size, Channels=3, Time=300)
-        
-        # 1. CNN Feature Extraction
-        cnn_out = self.cnn_extractor(x) # (Batch_size, Features=64, Time=75)
-
-        # 2. Prepare for RNN (Batch_size, Time, Features)
-        rnn_input = cnn_out.permute(0, 2, 1) # (Batch_size, 75, 64)
-        
-        # 3. Bi-LSTM Processing
-        # out: (Batch_size, Time, 2*hidden_size)
-        rnn_out, _ = self.rnn(rnn_input) 
-        
-        # We use the output of the *last* time step for prediction
-        # Alternatively, max pooling across the time dimension could be used.
-        final_feature = rnn_out[:, -1, :] 
-
-        # 4. Multi-Task Output
-        reg_output = self.regression_head(final_feature)
-        cls_output = self.classification_head(final_feature)
-
-        # Return both outputs for Multi-Task Loss calculation
-        return reg_output, cls_output
+        print(f"\nUsing features: {self.feature_columns}")
