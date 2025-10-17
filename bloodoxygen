@@ -1,43 +1,277 @@
-import pandas as pd
-import numpy as np
-import torch
-from torch.utils.data import Dataset
+import pandas as pd # Import the pandas library
+import numpy as np # Import the numpy library
+import torch # Import PyTorch library
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+
 
 class OximetryDataset(Dataset):
-    def __init__(self, filename='100001.csv', window_size=300, use_columns='auto'):
-        print(f"Loading dataset from {'100001.csv'}...")
-        self.data = pd.read_csv('100001.csv')
+    def __init__(self, filename='100002.csv', window_size=300, use_columns='auto'):
+        # Load data ONCE
+        print(f"Loading dataset from {filename}...")
+        self.data = pd.read_csv(filename)
         print(f"Dataset loaded: {self.data.shape[0]} rows × {self.data.shape[1]} columns")
         print(f"Columns: {self.data.columns.tolist()[:10]}...")
-       # Identify SpO2 columns (SpO2_1, SpO2_2, SpO2_3, SpO2_4, SpO2_5)
+
+        self.window_size = window_size
+
+        # Identify columns
         self.spo2_columns = [col for col in self.data.columns if 'SpO2' in col and col != 'Time']
-
-        # Identify Pulse columns (Pulse_1, Pulse_2, etc.)
         self.pulse_columns = [col for col in self.data.columns if 'Pulse' in col and 'PI' not in col]
-
-         # Identify other useful columns
         self.fio2_columns = [col for col in self.data.columns if 'FiO2' in col]
         self.etco2_columns = [col for col in self.data.columns if 'EtCO2' in col]
         print(f"\nDetected columns:")
+
         print(f"  SpO2 columns: {self.spo2_columns}")
         print(f"  Pulse columns: {self.pulse_columns}")
         print(f"  FiO2 columns: {self.fio2_columns}")
         print(f"  EtCO2 columns: {self.etco2_columns}")
+
+        # Select features
         if use_columns == 'auto':
-            # Use SpO2, Pulse, and FiO2 if available
             self.feature_columns = []
             if self.spo2_columns:
-                self.feature_columns.extend(self.spo2_columns[:3])  # Use first 3 SpO2
+                self.feature_columns.extend(self.spo2_columns[:3])
             if self.pulse_columns:
-                self.feature_columns.extend(self.pulse_columns[:1])  # Use first Pulse
+                self.feature_columns.extend(self.pulse_columns[:1])
             if self.fio2_columns:
-                self.feature_columns.extend(self.fio2_columns[:1])  # Use FiO2
-            while len(self.feature_columns) < 3 and self.spo2_columns:
-                self.feature_columns.append(self.spo2_columns[len(self.feature_columns) % len(self.spo2_columns)])
-
+                self.feature_columns.extend(self.fio2_columns[:1])
         elif use_columns == 'spo2_only':
             self.feature_columns = self.spo2_columns[:3]
         else:
             self.feature_columns = use_columns
 
         print(f"\nUsing features: {self.feature_columns}")
+
+        # Set target
+        self.target_column = self.spo2_columns[0] if self.spo2_columns else 'SpO2 1'
+        print(f"Using '{self.target_column}' as ground truth target")
+
+        # Clean data ONCE
+        print(f"\nRows before cleaning: {len(self.data)}")
+        self.data[self.feature_columns] = self.data[self.feature_columns].apply(pd.to_numeric, errors='coerce')
+        self.data[self.feature_columns] = self.data[self.feature_columns].ffill().bfill()
+
+        # Normalize features with safe division
+        print("Normalizing features...")
+        self.feature_means = self.data[self.feature_columns].mean()
+        self.feature_stds = self.data[self.feature_columns].std()
+
+        # Replace 0 std with 1 to avoid division by zero
+        self.feature_stds = self.feature_stds.replace(0, 1)
+
+        self.data[self.feature_columns] = (
+                                                  self.data[self.feature_columns] - self.feature_means
+                                          ) / self.feature_stds
+
+        # Fill any remaining NaN or inf values with 0
+        self.data[self.feature_columns] = self.data[self.feature_columns].replace([np.inf, -np.inf], 0)
+        self.data[self.feature_columns] = self.data[self.feature_columns].fillna(0)
+
+        print(f"After cleaning: {len(self.data)} valid samples")
+        print(f"Available windows: {max(0, len(self.data) - window_size + 1)}")
+        print("Dataset ready!\n")
+
+    def __len__(self):
+        return max(0, len(self.data) - self.window_size + 1)
+
+    def __getitem__(self, idx):
+        feature_window = self.data[self.feature_columns].iloc[idx:idx + self.window_size].values
+        spo2_gt = self.data[self.target_column].iloc[idx + self.window_size - 1]
+
+        feature_tensor = torch.tensor(feature_window, dtype=torch.float32).permute(1, 0)
+        regression_target = torch.tensor(spo2_gt, dtype=torch.float32)
+
+        # Define classification target (e.g., hypoxemia: SpO2 < 90)
+        classification_target = 1.0 if spo2_gt < 90 else 0.0
+        classification_target = torch.tensor(classification_target, dtype=torch.float32)
+
+        return feature_tensor, regression_target, classification_target
+
+
+class HybridOximetryModel(nn.Module):
+    def __init__(self, input_channels, window_size=300):
+        super(HybridOximetryModel, self).__init__()
+
+        # Convolutional layers
+        self.conv1 = nn.Conv1d(input_channels, 32, kernel_size=5, stride=1, padding=2)
+        self.conv2 = nn.Conv1d(32, 64, kernel_size=5, stride=1, padding=2)
+        self.pool = nn.MaxPool1d(2)
+        self.relu = nn.ReLU()
+
+        # Calculate size after convolutions and pooling
+        # After pool(conv1): 300 -> 150
+        # After pool(conv2): 150 -> 75
+        conv_output_size = 64 * 75  # 64 channels * 75 time points
+
+        # Fully connected layers
+        self.fc1 = nn.Linear(conv_output_size, 128)
+        self.fc2 = nn.Linear(128, 64)
+
+        # Output heads
+        self.regression_head = nn.Linear(64, 1)  # For SpO2 prediction
+        self.classification_head = nn.Sequential(
+            nn.Linear(64, 1),
+            nn.Sigmoid()  # For binary classification (hypoxemia)
+        )
+
+    def forward(self, x):
+        # Convolutional feature extraction
+        x = self.relu(self.conv1(x))
+        x = self.pool(x)
+        x = self.relu(self.conv2(x))
+        x = self.pool(x)
+
+        # Flatten
+        x = x.view(x.size(0), -1)
+
+        # Fully connected layers
+        x = self.relu(self.fc1(x))
+        x = self.relu(self.fc2(x))
+
+        # Two output heads
+        reg_output = self.regression_head(x)  # Regression output (SpO2 value)
+        cls_output = self.classification_head(x)  # Classification output (hypoxemia yes/no)
+
+        return reg_output, cls_output  # ← Return both outputs
+
+def train_model(model, train_loader, val_loader, num_epochs=50, learning_rate=0.001, device='cuda'):
+    """Train the model with multi-task learning"""
+    model = model.to(device)
+
+    regression_criterion = nn.MSELoss()
+    classification_criterion = nn.BCELoss()
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=0.5)
+
+    train_losses = []
+    val_losses = []
+    for epoch in range(num_epochs):
+        # Training
+        model.train()
+        train_loss = 0.0
+
+        for ppg_batch, reg_target, cls_target in train_loader:
+            ppg_batch = ppg_batch.to(device)
+            reg_target = reg_target.to(device).unsqueeze(1)
+            cls_target = cls_target.to(device).unsqueeze(1)
+
+            reg_output, cls_output = model(ppg_batch)
+
+            reg_loss = regression_criterion(reg_output, reg_target)
+            cls_loss = classification_criterion(cls_output, cls_target)
+            total_loss = reg_loss + cls_loss
+
+            optimizer.zero_grad()
+            total_loss.backward()
+            optimizer.step()
+
+            train_loss += total_loss.item()
+
+        train_loss /= len(train_loader)
+        train_losses.append(train_loss)
+        model.eval()
+        val_loss = 0.0
+
+        with torch.no_grad():
+            for ppg_batch, reg_target, cls_target in val_loader:
+                ppg_batch = ppg_batch.to(device)
+                reg_target = reg_target.to(device).unsqueeze(1)
+                cls_target = cls_target.to(device).unsqueeze(1)
+
+                reg_output, cls_output = model(ppg_batch)
+
+                reg_loss = regression_criterion(reg_output, reg_target)
+                cls_loss = classification_criterion(cls_output, cls_target)
+                total_loss = reg_loss + cls_loss
+
+                val_loss += total_loss.item()
+
+        val_loss /= len(val_loader)
+        val_losses.append(val_loss)
+
+        scheduler.step(val_loss)
+
+        if (epoch + 1) % 5 == 0:
+            print(f'Epoch [{epoch + 1}/{num_epochs}], Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}')
+
+    return train_losses, val_losses
+
+
+if __name__ == "__main__":
+    print("=" * 60)
+    print("Custom Blood Oxygen Dataset Loader")
+    print("=" * 60)
+
+    # ===========================
+    # STEP 1: LOAD YOUR DATASET
+    # ===========================
+    CSV_FILE = 'your_blood_oxygen_data.csv'  # REPLACE WITH YOUR FILE PATH
+
+    dataset = CustomOximetryDataset(
+        filename='100002.csv',  # ← Changed to match the actual parameter name
+        window_size=300,
+        use_columns='auto'
+    )
+    train_size = int(0.8 * len(dataset))
+    val_size = len(dataset) - train_size
+
+    train_dataset, val_dataset = torch.utils.data.random_split(
+        dataset, [train_size, val_size]
+    )
+
+    print(f"\nData split:")
+    print(f"  Training samples: {len(train_dataset)}")
+    print(f"  Validation samples: {len(val_dataset)}")
+
+    BATCH_SIZE = 32
+
+    train_loader = DataLoader(
+        train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0
+    )
+
+    val_loader = DataLoader(
+        val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0
+    )
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"\nUsing device: {device}")
+
+    # Get number of input channels from dataset
+    sample_input, _, _ = dataset[0]
+    n_channels = sample_input.shape[0]
+
+    print(f"Input shape: {sample_input.shape} (Channels={n_channels}, Time={sample_input.shape[1]})")
+
+    model = HybridOximetryModel(
+        input_channels=n_channels,
+        window_size=300
+    )
+
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Total parameters: {total_params:,}")
+    print("\n" + "=" * 60)
+    print("Starting Training...")
+    print("=" * 60)
+
+    train_losses, val_losses = train_model(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        num_epochs=50,
+        learning_rate=0.001,
+        device=device
+    )
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'train_losses': train_losses,
+        'val_losses': val_losses,
+        'feature_columns': dataset.feature_columns,
+        'target_column': dataset.target_column
+    }, 'oximetry_model_trained.pth')
+
+    print("\n" + "=" * 60)
+    print("Training Complete!")
+    print("Model saved as 'oximetry_model_trained.pth'")
+    print("=" * 60)
+
