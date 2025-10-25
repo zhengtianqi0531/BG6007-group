@@ -1,8 +1,10 @@
-import pandas as pd  # 用于读取和处理 CSV 文件
-import numpy as np   # 用于数值计算和数组操作
-import torch         # PyTorch 深度学习框架
-from torch.utils.data import Dataset  # PyTorch 数据集基类
+# import library
+import pandas as pd  
+import numpy as np   
+import torch         
+from torch.utils.data import Dataset  
 
+# Data set class
 class OximetryDataset(Dataset):
     def __init__(self, ppg_file, gt_file, window_size=300):
         self.ppg_df = pd.read_csv(ppg_file)  # Remove index_col=0
@@ -22,7 +24,8 @@ class OximetryDataset(Dataset):
 
         self.window_size = window_size
         ppg_columns = ['R', 'G', 'B']
-
+# data standardization
+        
         self.data[ppg_columns] = (
                                          self.data[ppg_columns] - self.data[ppg_columns].mean()
                                  ) / self.data[ppg_columns].std()
@@ -32,15 +35,16 @@ class OximetryDataset(Dataset):
         if 'SpO2_gt' in self.data.columns:
             self.spo2_column = 'SpO2_gt'
         elif 'sp02_1' in self.data.columns:
-            self.spo2_column = 'sp02_1'  # 使用第一个脉搏血氧仪的读数
+            self.spo2_column = 'sp02_1'  
         else:
-            # 如果找不到明确的列，尝试找包含 'spo2' 或 'sp02' 的列
+
             spo2_cols = [col for col in self.data.columns
                          if 'spo2' in col.lower() or 'sp02' in col.lower()]
             if spo2_cols:
                 self.spo2_column = spo2_cols[0]
             else:
                 raise ValueError("SpO2 true value column not found! Please check the data file.")
+# type information
 
         print(f"Dataset loading completed!")
         print(f"   - PPG file: {ppg_file}")
@@ -49,7 +53,8 @@ class OximetryDataset(Dataset):
         print(f"   - window size: {window_size}")
         print(f"   - SpO2 colum: {self.spo2_column}")
         print(f"   - Number of samples that can be generated: {len(self)}")
-
+# Key method
+    
     def __len__(self):
         return len(self.data) - self.window_size + 1
 
@@ -74,18 +79,16 @@ class OximetryDataset(Dataset):
         return ppg_tensor, regression_target, classification_target
 
 
-# THIS SHOULD BE AT TOP LEVEL - NO INDENTATION!
+# Test code
+
 if __name__ == "__main__":
-    """
-    这是一个测试代码，演示如何使用这个数据集类
-    """
+    
     import os
 
     print("=" * 70)
     print("Blood oxygen dataset testing")
     print("=" * 70)
 
-    # DEBUG: Check current directory and files
     print("\n[DEBUG] Current working directory:")
     print(os.getcwd())
     print("\n[DEBUG] Files in current directory:")
@@ -96,7 +99,6 @@ if __name__ == "__main__":
     ppg_file = "100002.csv"
     gt_file = "100002 (1).csv"
 
-    # DEBUG: Check if files exist
     print(f"[DEBUG] Does {ppg_file} exist? {os.path.exists(ppg_file)}")
     print(f"[DEBUG] Does {gt_file} exist? {os.path.exists(gt_file)}")
     print()
@@ -135,19 +137,18 @@ if __name__ == "__main__":
 
     from torch.utils.data import DataLoader
 
-    # 创建 DataLoader
     dataloader = DataLoader(
         dataset,
-        batch_size=16,  # 每批 16 个样本
-        shuffle=True,  # 随机打乱
-        num_workers=0  # 单进程加载（Windows 上建议设为0）
+        batch_size=16,  
+        shuffle=True, 
+        num_workers=0 
     )
 
-    print(f"\n使用 DataLoader:")
+    print(f"\nuse DataLoader:")
     print(f"   - Batch size: 16")
     print(f"   - Total number of batches: {len(dataloader)}")
 
-    # 获取第一个批次
+    
     batch_ppg, batch_reg, batch_cls = next(iter(dataloader))
 
     print(f"\nthe first batch:")
@@ -158,7 +159,7 @@ if __name__ == "__main__":
     hypoxemia_count = 0
     normal_count = 0
 
-    for i in range(min(1000, len(dataset))):  # 检查前1000个样本
+    for i in range(min(1000, len(dataset))):  
         _, _, cls_label = dataset[i]
         if cls_label.item() == 1.0:
             hypoxemia_count += 1
@@ -184,28 +185,22 @@ import torch.nn as nn
 from collections import deque
 import time
 
+# neural network model
 
-# ============================================
-# YOUR MODEL DEFINITION (Keep this the same)
-# ============================================
 class HybridOximetryModel(nn.Module):
     def __init__(self, input_channels, window_size=300):
         super(HybridOximetryModel, self).__init__()
 
-        # Convolutional layers
         self.conv1 = nn.Conv1d(input_channels, 32, kernel_size=5, stride=1, padding=2)
         self.conv2 = nn.Conv1d(32, 64, kernel_size=5, stride=1, padding=2)
         self.pool = nn.MaxPool1d(2)
         self.relu = nn.ReLU()
 
-        # Calculate size after convolutions and pooling
         conv_output_size = 64 * 75  # 64 channels * 75 time points
 
-        # Fully connected layers
         self.fc1 = nn.Linear(conv_output_size, 128)
         self.fc2 = nn.Linear(128, 64)
 
-        # Output heads
         self.regression_head = nn.Linear(64, 1)
         self.classification_head = nn.Sequential(
             nn.Linear(64, 1),
@@ -219,32 +214,25 @@ class HybridOximetryModel(nn.Module):
         x = self.relu(self.conv2(x))
         x = self.pool(x)
 
-        # Flatten
         x = x.view(x.size(0), -1)
 
-        # Fully connected layers
         x = self.relu(self.fc1(x))
         x = self.relu(self.fc2(x))
 
-        # Two output heads
         reg_output = self.regression_head(x)
         cls_output = self.classification_head(x)
 
         return reg_output, cls_output
 
 
-# ============================================
-# FINGER DETECTOR
-# ============================================
+# Finger detector
 class FingerDetector:
-    """使用颜色检测来定位手指"""
 
     def __init__(self):
         self.lower_skin = np.array([0, 20, 70], dtype=np.uint8)
         self.upper_skin = np.array([20, 255, 255], dtype=np.uint8)
 
     def detect_finger(self, frame):
-        """检测手指区域"""
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, self.lower_skin, self.upper_skin)
 
@@ -274,11 +262,8 @@ class FingerDetector:
         return (x1, y1, x2, y2)
 
 
-# ============================================
-# PPG EXTRACTOR
-# ============================================
+# PPG Signal Extractor
 class AdvancedPPGExtractor:
-    """高级 PPG 信号提取器"""
 
     def __init__(self, buffer_size=300, fps=30):
         self.buffer_size = buffer_size
@@ -290,7 +275,6 @@ class AdvancedPPGExtractor:
         self.finger_detector = FingerDetector()
 
     def extract_roi(self, frame, use_finger_detection=True):
-        """提取 ROI"""
         if use_finger_detection:
             roi_coords = self.finger_detector.detect_finger(frame)
             if roi_coords is None:
@@ -318,7 +302,6 @@ class AdvancedPPGExtractor:
         return roi, roi_coords
 
     def add_frame(self, frame, use_finger_detection=True):
-        """添加新帧"""
         roi, roi_coords = self.extract_roi(frame, use_finger_detection)
 
         b_mean = np.mean(roi[:, :, 0])
@@ -333,7 +316,6 @@ class AdvancedPPGExtractor:
         return roi_coords
 
     def get_signals(self):
-        """获取信号"""
         if len(self.red_buffer) < self.buffer_size:
             return None, None, None
 
@@ -344,7 +326,6 @@ class AdvancedPPGExtractor:
         return r, g, b
 
     def assess_signal_quality(self):
-        """评估信号质量"""
         r, g, b = self.get_signals()
         if r is None:
             return 0.0
@@ -358,15 +339,10 @@ class AdvancedPPGExtractor:
         return np.clip(quality, 0.0, 1.0)
 
     def is_ready(self):
-        """检查是否准备好"""
         return len(self.red_buffer) >= self.buffer_size
 
 
-# ============================================
-# SPO2 MONITOR (MODIFIED FOR YOUR MODEL)
-# ============================================
 class IntegratedSpO2Monitor:
-    """集成您训练好的模型的血氧监测器"""
 
     def __init__(self, model_path=None, window_size=300, use_finger_detection=True, device='cpu'):
         self.window_size = window_size
@@ -374,28 +350,24 @@ class IntegratedSpO2Monitor:
         self.device = device
         self.ppg_extractor = AdvancedPPGExtractor(buffer_size=window_size)
 
-        # Load your trained model
         self.model = None
         if model_path:
             self.load_model(model_path)
 
-        # For smoothing SpO2 readings
         self.spo2_history = deque(maxlen=10)
         self.hypoxemia_history = deque(maxlen=10)
 
+    # SpO2 monitor
     def load_model(self, model_path):
-        """加载您训练好的模型"""
         try:
             print(f"Loading model from {model_path}...")
             checkpoint = torch.load(model_path, map_location=self.device)
 
-            # Create model instance (3 channels: R, G, B)
             self.model = HybridOximetryModel(
                 input_channels=3,
                 window_size=self.window_size
             )
 
-            # Load weights
             self.model.load_state_dict(checkpoint['model_state_dict'])
             self.model.to(self.device)
             self.model.eval()
@@ -409,12 +381,9 @@ class IntegratedSpO2Monitor:
             self.model = None
 
     def preprocess_signals(self, r, g, b):
-        """
-        预处理信号 - 必须与训练时相同！
-        """
+        
         signals = np.stack([r, g, b], axis=1)
 
-        # Z-score 标准化（与 Dataset.py 中相同）
         mean = signals.mean(axis=0)
         std = signals.std(axis=0)
         normalized = (signals - mean) / (std + 1e-8)
@@ -422,19 +391,17 @@ class IntegratedSpO2Monitor:
         return normalized
 
     def predict_spo2(self):
-        """
-        预测 SpO2 - 适配您的双输出模型
-        """
+
         r, g, b = self.ppg_extractor.get_signals()
 
         if r is None:
             return None, None
 
-        # 预处理
+
         normalized = self.preprocess_signals(r, g, b)
 
         if self.model is None:
-            # 简单估计方法
+
             r_ac = np.std(r)
             r_dc = np.mean(r)
             ir_ac = np.std(b)
@@ -445,23 +412,18 @@ class IntegratedSpO2Monitor:
             spo2 = np.clip(spo2, 70, 100)
             hypoxemia_risk = 1.0 if spo2 < 90 else 0.0
         else:
-            # 使用您的模型预测
+
             with torch.no_grad():
-                # 转换为 tensor (1, 3, 300)
                 ppg_tensor = torch.tensor(normalized.T, dtype=torch.float32)
                 ppg_tensor = ppg_tensor.unsqueeze(0).to(self.device)
 
-                # 预测 - 您的模型返回两个输出
                 reg_output, cls_output = self.model(ppg_tensor)
 
-                # 提取值
                 spo2 = reg_output.squeeze().item()
                 hypoxemia_risk = cls_output.squeeze().item()
 
-                # 限制 SpO2 范围
                 spo2 = np.clip(spo2, 70, 100)
 
-        # 平滑读数
         self.spo2_history.append(spo2)
         self.hypoxemia_history.append(hypoxemia_risk)
 
@@ -471,7 +433,7 @@ class IntegratedSpO2Monitor:
         return spo2_smoothed, hypoxemia_smoothed
 
     def draw_signal_plot(self, frame, signals):
-        """在画面上绘制信号波形"""
+
         if signals is None:
             return
 
@@ -508,30 +470,30 @@ class IntegratedSpO2Monitor:
         cv2.putText(frame, "PPG Signal", (plot_x, plot_y - 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
+    # Main operation loop
     def run(self, camera_id=0):
-        """运行监测"""
         cap = cv2.VideoCapture(camera_id)
 
         if not cap.isOpened():
-            print("错误：无法打开摄像头")
+            print("Error: Unable to open the camera")
             return
 
         print("=" * 70)
-        print("实时血氧监测（使用您的训练模型）")
+        print("Real-time blood oxygen monitoring (using your training model)")
         print("=" * 70)
-        print("\n提示:")
+        print("\nhint:")
         if self.use_finger_detection:
-            print("  1. 将手指放在摄像头前（会自动检测）")
+            print("  1.Place your fingers in front of the camera (it will automatically detect)")
         else:
-            print("  1. 将手指放在绿色框内")
-        print("  2. 保持手指稳定，确保光线充足")
-        print("  3. 等待信号质量达到良好水平")
-        print("  4. 按 'q' 退出，按 's' 截图\n")
+            print("  1. Place your finger inside the green box")
+        print("  2. Keep your fingers steady and ensure there is sufficient light")
+        print("  3. Wait until the signal quality reaches a good level")
+        print("  4. Press 'q' to exit, and press 's' to take a screenshot\n")
 
         if self.model:
-            print("✓ 使用训练好的深度学习模型\n")
+            print("✓ Use the trained deep learning model\n")
         else:
-            print("⚠ 使用简单估计方法（未加载模型）\n")
+            print("⚠ Use a simple estimation method (without loading the model)\n")
 
         fps_counter = 0
         fps_start_time = time.time()
@@ -549,14 +511,14 @@ class IntegratedSpO2Monitor:
 
             if self.ppg_extractor.is_ready() and quality > 0.5:
                 color = (0, 255, 0)
-                status = "信号良好"
+                status = "Signal is good"
             elif self.ppg_extractor.is_ready():
                 color = (0, 165, 255)
-                status = "信号质量差"
+                status = "Poor signal quality"
             else:
                 color = (0, 165, 255)
                 progress = len(self.ppg_extractor.red_buffer)
-                status = f"采集中... {progress}/{self.window_size}"
+                status = f"Collection process... {progress}/{self.window_size}"
 
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             cv2.putText(frame, status, (10, 30),
@@ -587,7 +549,6 @@ class IntegratedSpO2Monitor:
                     cv2.putText(frame, health_status, (10, 140),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, text_color, 2)
 
-                    # 显示低氧风险（来自分类头）
                     risk_text = f"Hypoxemia Risk: {hypoxemia_risk * 100:.0f}%"
                     risk_color = (0, 0, 255) if hypoxemia_risk > 0.5 else (0, 255, 0)
                     cv2.putText(frame, risk_text, (10, 170),
@@ -618,27 +579,26 @@ class IntegratedSpO2Monitor:
             elif key == ord('s'):
                 filename = f"spo2_screenshot_{int(time.time())}.png"
                 cv2.imwrite(filename, frame)
-                print(f"截图已保存: {filename}")
+                print(f"The screenshot has been saved.: {filename}")
 
         cap.release()
         cv2.destroyAllWindows()
-        print("\n监测结束")
+        print("\nMonitoring is complete.")
 
 
-# ============================================
-# MAIN PROGRAM
-# ============================================
+
 if __name__ == "__main__":
-    # 设置设备
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # 创建监测器并加载您的模型
+
     monitor = IntegratedSpO2Monitor(
-        model_path='oximetry_model_trained.pth',  # ← 您的模型路径
+        model_path='oximetry_model_trained.pth', 
         window_size=300,
         use_finger_detection=True,
         device=device
     )
 
-    # 运行监测
+
+
     monitor.run(camera_id=0)
